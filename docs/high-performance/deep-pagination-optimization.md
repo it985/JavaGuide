@@ -18,20 +18,18 @@ head:
 # MySQL 在无法利用索引的情况下跳过1000000条记录后，再获取10条记录
 SELECT * FROM t_order ORDER BY id LIMIT 1000000, 10
 ```
+
 ## 深度分页问题的原因
-**全表扫描**：当OFFSET值较大时，MySQL可能会选择执行全表扫描而不是使用索引。
-![image](https://github.com/user-attachments/assets/d2537428-74db-4eba-bd1b-20b0ef681b8e)
-![image](https://github.com/user-attachments/assets/00467d02-b5bd-4241-8145-acded334b76a)
 
-具体的临界点每个机器不一样，我的机器上是5980，为什么产生呢？
-![image](https://github.com/user-attachments/assets/19bb5403-398b-4bff-934a-7db2e31995aa)
-![image](https://github.com/user-attachments/assets/d01a5b84-a47e-4ddd-966d-520cc3d3b3bd)
-MySQL数据库的查询优化器是采用了基于代价的，而查询代价的估算是基于CPU代价和IO代价。
-如果MySQL在查询代价估算中，认为全表扫描方式比走索引扫描的方式效率更高的话，就会放弃索引，直接全表扫描。
-这就是为什么在大分页的SQL查询中，明明给该字段加了索引，但是MySQL却走了全表扫描的原因。
+当查询偏移量过大时，MySQL 的查询优化器可能会选择全表扫描而不是利用索引来优化查询。这是因为扫描索引和跳过大量记录可能比直接全表扫描更耗费资源。
 
+![深度分页问题](https://oss.javaguide.cn/github/javaguide/mysql/deep-pagination-phenomenon.png)
 
+不同机器上这个查询偏移量过大的临界点可能不同，取决于多个因素，包括硬件配置（如 CPU 性能、磁盘速度）、表的大小、索引的类型和统计信息等。
 
+![转全表扫描的临界点](https://oss.javaguide.cn/github/javaguide/mysql/deep-pagination-phenomenon-critical-point.png)
+
+MySQL 的查询优化器采用基于成本的策略来选择最优的查询执行计划。它会根据 CPU 和 I/O 的成本来决定是否使用索引扫描或全表扫描。如果优化器认为全表扫描的成本更低，它就会放弃使用索引。不过，即使偏移量很大，如果查询中使用了覆盖索引（covering index），MySQL 仍然可能会使用索引，避免回表操作。
 
 ## 深度分页优化建议
 
@@ -66,12 +64,12 @@ SELECT * FROM t_order WHERE id > 100000 LIMIT 10
 
 ```sql
 # 通过子查询来获取 id 的起始值，把 limit 1000000 的条件转移到子查询
-SELECT * FROM t_order WHERE id >= (SELECT id FROM t_order limit 1000000, 1) LIMIT 10;
+SELECT * FROM t_order WHERE id >= (SELECT id FROM t_order where id > 1000000 limit 1) LIMIT 10;
 ```
 
 **工作原理**:
 
-1. 子查询 `(SELECT id FROM t_order LIMIT 1000000, 1)` 会利用主键索引快速定位到第 1000001 条记录，并返回其 ID 值。
+1. 子查询 `(SELECT id FROM t_order where id > 1000000 limit 1)` 会利用主键索引快速定位到第 1000001 条记录，并返回其 ID 值。
 2. 主查询 `SELECT * FROM t_order WHERE id >= ... LIMIT 10` 将子查询返回的起始 ID 作为过滤条件，使用 `id >=` 获取从该 ID 开始的后续 10 条记录。
 
 不过，子查询的结果会产生一张新表，会影响性能，应该尽量避免大量使用子查询。并且，这种方法只适用于 ID 是正序的。在复杂分页场景，往往需要通过过滤条件，筛选到符合条件的 ID，此时的 ID 是离散且不连续的。
@@ -86,12 +84,12 @@ SELECT * FROM t_order WHERE id >= (SELECT id FROM t_order limit 1000000, 1) LIMI
 -- 使用 INNER JOIN 进行延迟关联
 SELECT t1.*
 FROM t_order t1
-INNER JOIN (SELECT id FROM t_order LIMIT 1000000, 10) t2 ON t1.id = t2.id;
+INNER JOIN (SELECT id FROM t_order where id > 1000000 LIMIT 10) t2 ON t1.id = t2.id;
 ```
 
 **工作原理**:
 
-1. 子查询 `(SELECT id FROM t_order LIMIT 1000000, 10)` 利用主键索引快速定位目标分页的 10 条记录的 ID。
+1. 子查询 `(SELECT id FROM t_order where id > 1000000 LIMIT 10)` 利用主键索引快速定位目标分页的 10 条记录的 ID。
 2. 通过 `INNER JOIN` 将子查询结果与主表 `t_order` 关联，获取完整的记录数据。
 
 除了使用 INNER JOIN 之外，还可以使用逗号连接子查询。
@@ -99,7 +97,7 @@ INNER JOIN (SELECT id FROM t_order LIMIT 1000000, 10) t2 ON t1.id = t2.id;
 ```sql
 -- 使用逗号进行延迟关联
 SELECT t1.* FROM t_order t1,
-(SELECT id FROM t_order limit 1000000, 10) t2
+(SELECT id FROM t_order where id > 1000000 LIMIT 10) t2
 WHERE t1.id = t2.id;
 ```
 
